@@ -1,0 +1,155 @@
+<?php
+define('MYSEARCH_ENTITY_TYPE', 'node');
+define('MYSEARCH_RESULTS_NUMBER', 10);
+
+/**
+ * Implementation of hook_menu()
+ */
+
+function mysearch_menu()
+{
+    $items = array();
+    $items['mysearch'] = array(
+        'title' => 'Search',
+        'description' => 'Allows user to search for separate nodes by entered keyword(s)',
+        'page callback' => '_mysearch_results_page',
+        'access arguments' => array('access mysearch'),
+        'type' => MENU_NORMAL_ITEM,
+    );
+    return $items;
+}
+
+/**
+ * Implementation of hook_permission()
+ */
+
+function mysearch_permission()
+{
+    return array(
+        'access mysearch' => array(
+            'title' => t('Access "My search"'),
+            'description' => t('Allows user to access search results'),
+        ),
+    );
+}
+
+function _mysearch_results_page()
+{
+    global $user;
+
+    $searchterm = arg(1);
+    if (!empty($searchterm)) {
+        $nids = array();
+        // search for titles
+        $query = new EntityFieldQuery();
+        $query->entityCondition('entity_type', MYSEARCH_ENTITY_TYPE);
+        $query->propertyCondition('title', $searchterm, 'CONTAINS');
+        $result = $query->execute();
+        unset($query);
+        $nids = _mysearch_result_ids($result, MYSEARCH_ENTITY_TYPE, $nids);
+
+        $fields = field_info_fields();
+        $term_ids = array();
+
+        foreach ($fields as $field) {
+            $columns = array_keys($field['columns']);
+            $foreign_keys = array_keys($field['foreign keys']);
+            foreach ($columns as $column) {
+                if (!in_array($column, $foreign_keys)) {
+                    // search for fields
+                    $query = new EntityFieldQuery();
+                    $query->entityCondition('entity_type', MYSEARCH_ENTITY_TYPE);
+                    $query->fieldCondition($field['field_name'], $column, $searchterm, 'CONTAINS');
+                    $result = $query->execute();
+                    $nids = _mysearch_result_ids($result, MYSEARCH_ENTITY_TYPE, $nids);
+                    unset($result, $query);
+                } elseif ($field['type'] === 'taxonomy_term_reference') {
+                    // search for fields with taxonomy term references
+                    foreach ($field['settings']['allowed_values'] as $voc) {
+                        $query = new EntityFieldQuery();
+                        $query->entityCondition('entity_type', 'taxonomy_term');
+                        $query->entityCondition('bundle', $voc['vocabulary']);
+                        $query->propertyCondition('name', $searchterm, 'CONTAINS');
+                        $result = $query->execute();
+                        $term_ids = array_merge($term_ids, _mysearch_result_ids($result, 'taxonomy_term', $term_ids));
+
+                    }
+                }
+            }
+        }
+        // get all nodes with our terms
+        if (count($term_ids)) {
+            $query = db_select('taxonomy_index', 'ti');
+            $query->fields('ti', array('nid'));
+            $query->condition('ti.tid', $term_ids, 'IN');
+            $query->groupBy('ti.nid');
+            $terms_referenced_nodes = $query->execute()->fetchCol(0);
+            $nids = array_merge($nids, $terms_referenced_nodes);
+        }
+        // get all published nodes according to the user access rights + pager
+        if (count($nids)) {
+            $query = new EntityFieldQuery();
+            $query->entityCondition('entity_type', MYSEARCH_ENTITY_TYPE);
+            $query->propertyCondition('nid', $nids, 'IN');
+            $query->propertyCondition('status', NODE_PUBLISHED);
+            $query->addTag('node_access');
+            $query->addMetaData('account', $user);
+            $query->pager(MYSEARCH_RESULTS_NUMBER);
+            $result = $query->execute();
+        }
+
+        if (!empty($result) && count($result[MYSEARCH_ENTITY_TYPE])) {
+            $nodes = node_load_multiple(array_keys($result[MYSEARCH_ENTITY_TYPE]));
+            $links = array();
+            foreach ($nodes as $node) {
+                $links[] = l($node->title, 'node/' . $node->nid);
+            }
+
+            //output links
+            return theme('mysearch_results_page', array('items' => $links, 'title' => t('Search results for %searchterm', ['%searchterm' => $searchterm])));
+        } else {
+            return t('No results found');
+        }
+
+    } else {
+        drupal_set_message(t('You send us empty request'), 'status');
+        return t('No results found');
+    }
+}
+
+function _mysearch_result_ids($result, $entity_type, $ids)
+{
+    if (isset($result[$entity_type])) {
+        $ids = array_unique(array_merge($ids, array_keys($result[$entity_type])));
+    }
+    return $ids;
+}
+
+/**
+ * Implementation of hook_theme()
+ *
+ */
+
+function mysearch_theme()
+{
+    return array(
+        'mysearch_results_page' => array(
+            'variables' => array(
+                'title' => NULL,
+                'items' => NULL,
+            ),
+        ),
+    );
+}
+
+/**
+ *  theming_function()
+ */
+
+function theme_mysearch_results_page($variables)
+{
+    $variables['attributes'] = array('class' => 'mysearch_results_page');
+    $output = theme('item_list', $variables);
+    $output .= theme('pager');
+    return $output;
+}

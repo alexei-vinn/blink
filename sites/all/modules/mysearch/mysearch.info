@@ -1,0 +1,3 @@
+name = Mysearch module
+description = Simple search module for Blink interview
+core = 7.x
